@@ -941,8 +941,8 @@ async function copyShipment(shipment) {
 }
 
 function downloadWorkbook() {
-  const html = buildStyledWorkbookHtml(getDisplayShipments());
-  const blob = new Blob([html], { type: "application/vnd.ms-excel;charset=utf-8" });
+  const workbookXml = buildSpreadsheetXml(getDisplayShipments());
+  const blob = new Blob([workbookXml], { type: "application/vnd.ms-excel;charset=utf-8" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
@@ -973,28 +973,115 @@ function buildClipboardHtml(rows) {
   return `<table style="border-collapse:collapse;">${htmlRows}</table>`;
 }
 
-function buildStyledWorkbookHtml(displayShipments) {
-  const sheets = displayShipments.map((shipment, index) => {
-    const sheetName = escapeHtml(safeSheetName(shipment.displayName || shipment.shipmentId));
-    const pageBreak = index === 0 ? "" : "page-break-before:always;";
+function buildSpreadsheetXml(displayShipments) {
+  const worksheets = displayShipments.map((shipment) => {
+    const sheetName = xmlEscape(safeSheetName(shipment.displayName || shipment.shipmentId));
     return `
-      <table style="border-collapse:collapse;${pageBreak}" x:str>
-        <caption style="font-family:Arial;font-size:12pt;font-weight:bold;text-align:left;margin:8px 0;">${sheetName}</caption>
-        ${buildStyledRows(shipment.outputRows, { includeHeader: true, blankMergedContinuations: true })}
-      </table>
+      <Worksheet ss:Name="${sheetName}">
+        <Table>
+          ${buildSpreadsheetColumns()}
+          ${buildSpreadsheetHeaderRow()}
+          ${buildSpreadsheetDataRows(shipment.outputRows)}
+        </Table>
+        <WorksheetOptions xmlns="urn:schemas-microsoft-com:office:excel">
+          <DisplayGridlines/>
+        </WorksheetOptions>
+      </Worksheet>
     `;
   }).join("");
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+    <?mso-application progid="Excel.Sheet"?>
+    <Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"
+      xmlns:o="urn:schemas-microsoft-com:office:office"
+      xmlns:x="urn:schemas-microsoft-com:office:excel"
+      xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet"
+      xmlns:html="http://www.w3.org/TR/REC-html40">
+      <Styles>
+        <Style ss:ID="Header">
+          <Alignment ss:Horizontal="Center" ss:Vertical="Center"/>
+          <Borders>${spreadsheetBorders()}</Borders>
+          <Font ss:FontName="宋体" ss:Size="9" ss:Color="#000000"/>
+        </Style>
+        <Style ss:ID="BoxNo">
+          <Alignment ss:Horizontal="Left" ss:Vertical="Center"/>
+          <Borders>${spreadsheetBorders()}</Borders>
+          <Font ss:FontName="Arial" ss:Size="10.5" ss:Color="#000000"/>
+        </Style>
+        <Style ss:ID="RedText">
+          <Alignment ss:Horizontal="Center" ss:Vertical="Center"/>
+          <Borders>${spreadsheetBorders()}</Borders>
+          <Font ss:FontName="宋体" ss:Size="9" ss:Color="#FF0000"/>
+        </Style>
+        <Style ss:ID="RedTextLeft">
+          <Alignment ss:Horizontal="Left" ss:Vertical="Center"/>
+          <Borders>${spreadsheetBorders()}</Borders>
+          <Font ss:FontName="宋体" ss:Size="9" ss:Color="#FF0000"/>
+        </Style>
+      </Styles>
+      ${worksheets}
+    </Workbook>`;
+}
+
+function spreadsheetBorders() {
   return `
-    <html xmlns:o="urn:schemas-microsoft-com:office:office"
-          xmlns:x="urn:schemas-microsoft-com:office:excel"
-          xmlns="http://www.w3.org/TR/REC-html40">
-      <head>
-        <meta charset="utf-8">
-        <!--[if gte mso 9]><xml><x:ExcelWorkbook><x:ExcelWorksheets><x:ExcelWorksheet><x:Name>装箱单</x:Name><x:WorksheetOptions><x:DisplayGridlines/></x:WorksheetOptions></x:ExcelWorksheet></x:ExcelWorksheets></x:ExcelWorkbook></xml><![endif]-->
-      </head>
-      <body>${sheets}</body>
-    </html>
+    <Border ss:Position="Bottom" ss:LineStyle="Continuous" ss:Weight="1"/>
+    <Border ss:Position="Left" ss:LineStyle="Continuous" ss:Weight="1"/>
+    <Border ss:Position="Right" ss:LineStyle="Continuous" ss:Weight="1"/>
+    <Border ss:Position="Top" ss:LineStyle="Continuous" ss:Weight="1"/>
   `;
+}
+
+function buildSpreadsheetColumns() {
+  return getLayoutColumns().map((column) => `<Column ss:Width="${column.wch * 7}"/>`).join("");
+}
+
+function buildSpreadsheetHeaderRow() {
+  const cells = getLayoutRanges().map((field) => buildSpreadsheetCell(field.label, field, {
+    styleId: "Header",
+    type: "String",
+  })).join("");
+  return `<Row>${cells}</Row>`;
+}
+
+function buildSpreadsheetDataRows(rows) {
+  return rows.map((row, rowIndex) => {
+    const cells = getLayoutRanges().map((field) => {
+      if (isVerticalMergeContinuation(rows, rowIndex, field)) return "";
+      let value = row[field.key];
+      const styleId = field.key === "boxNo" ? "BoxNo" : (field.key === "goodsName" ? "RedTextLeft" : "RedText");
+      return buildSpreadsheetCell(value, field, {
+        styleId,
+        type: field.numeric ? "Number" : "String",
+        mergeDown: getVerticalMergeDown(rows, rowIndex, field),
+      });
+    }).join("");
+    return `<Row>${cells}</Row>`;
+  }).join("");
+}
+
+function buildSpreadsheetCell(value, field, options = {}) {
+  const mergeAcross = field.span > 1 ? ` ss:MergeAcross="${field.span - 1}"` : "";
+  const mergeDown = options.mergeDown ? ` ss:MergeDown="${options.mergeDown}"` : "";
+  const type = options.type || "String";
+  const text = value == null || value === "" ? "" : String(value);
+  return `<Cell ss:Index="${field.start + 1}" ss:StyleID="${options.styleId}"${mergeAcross}${mergeDown}><Data ss:Type="${type}">${xmlEscape(text)}</Data></Cell>`;
+}
+
+function getVerticalMergeDown(rows, rowIndex, field) {
+  if (!config.mergeBoxCells || config.mergeMixedNames || field.span !== 1) return 0;
+  if (field.key !== "boxNo" && field.key !== "totalBoxes") return 0;
+  if (rowIndex > 0 && rows[rowIndex - 1].boxNo === rows[rowIndex].boxNo) return 0;
+
+  let end = rowIndex + 1;
+  while (end < rows.length && rows[end].boxNo === rows[rowIndex].boxNo) end += 1;
+  return Math.max(0, end - rowIndex - 1);
+}
+
+function isVerticalMergeContinuation(rows, rowIndex, field) {
+  if (!config.mergeBoxCells || config.mergeMixedNames || field.span !== 1) return false;
+  if (field.key !== "boxNo" && field.key !== "totalBoxes") return false;
+  return rowIndex > 0 && rows[rowIndex - 1].boxNo === rows[rowIndex].boxNo;
 }
 
 function buildStyledRows(rows, options = {}) {
@@ -1025,9 +1112,10 @@ function buildStyledCell(value, field, options = {}) {
 }
 
 function getDeclarationCellStyle(fieldKey) {
+  const isHeader = fieldKey === "header";
   const isBoxNo = fieldKey === "boxNo";
   const fontFamily = isBoxNo ? "Arial" : "SimSun, 宋体";
-  const color = isBoxNo ? "#000000" : "#FF0000";
+  const color = isHeader || isBoxNo ? "#000000" : "#FF0000";
   const fontSize = isBoxNo ? "10.5pt" : "9pt";
   const align = fieldKey === "boxNo" || fieldKey === "goodsName" ? "left" : "center";
   return [
@@ -1384,4 +1472,8 @@ function escapeHtml(value) {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
+}
+
+function xmlEscape(value) {
+  return escapeHtml(value).replace(/'/g, "&apos;");
 }
