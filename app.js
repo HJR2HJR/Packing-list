@@ -941,21 +941,14 @@ async function copyShipment(shipment) {
 }
 
 function downloadWorkbook() {
-  if (!window.XLSX) {
-    setAlerts(["Excel 解析库没有加载成功，暂时无法下载 Excel。"]);
-    return;
-  }
-
-  const workbook = XLSX.utils.book_new();
-  getDisplayShipments().forEach((shipment) => {
-    const data = toDeclarationAoa(shipment.outputRows, { includeHeader: true, blankMergedContinuations: true });
-    const sheet = XLSX.utils.aoa_to_sheet(data);
-    sheet["!cols"] = getLayoutColumns();
-    const merges = getExcelMerges(shipment.outputRows);
-    if (merges.length) sheet["!merges"] = merges;
-    XLSX.utils.book_append_sheet(workbook, sheet, safeSheetName(shipment.displayName || shipment.shipmentId));
-  });
-  XLSX.writeFile(workbook, `装箱单-${formatDate(new Date())}.xlsx`);
+  const html = buildStyledWorkbookHtml(getDisplayShipments());
+  const blob = new Blob([html], { type: "application/vnd.ms-excel;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `装箱单-${formatDate(new Date())}.xls`;
+  a.click();
+  URL.revokeObjectURL(url);
   persistArchive();
 }
 
@@ -976,16 +969,59 @@ function toDeclarationAoa(rows, options = {}) {
 }
 
 function buildClipboardHtml(rows) {
-  const layout = getDeclarationLayout();
-  const htmlRows = rows.map((row) => {
-    const cells = DECLARATION_FIELDS.map((field) => {
-      const span = layout[field.key];
-      const colspan = span > 1 ? ` colspan="${span}"` : "";
-      return `<td${colspan} style="${getDeclarationCellStyle(field.key)}">${escapeHtml(row[field.key])}</td>`;
-    }).join("");
-    return `<tr>${cells}</tr>`;
-  }).join("");
+  const htmlRows = buildStyledRows(rows, { includeHeader: false, blankMergedContinuations: false });
   return `<table style="border-collapse:collapse;">${htmlRows}</table>`;
+}
+
+function buildStyledWorkbookHtml(displayShipments) {
+  const sheets = displayShipments.map((shipment, index) => {
+    const sheetName = escapeHtml(safeSheetName(shipment.displayName || shipment.shipmentId));
+    const pageBreak = index === 0 ? "" : "page-break-before:always;";
+    return `
+      <table style="border-collapse:collapse;${pageBreak}" x:str>
+        <caption style="font-family:Arial;font-size:12pt;font-weight:bold;text-align:left;margin:8px 0;">${sheetName}</caption>
+        ${buildStyledRows(shipment.outputRows, { includeHeader: true, blankMergedContinuations: true })}
+      </table>
+    `;
+  }).join("");
+  return `
+    <html xmlns:o="urn:schemas-microsoft-com:office:office"
+          xmlns:x="urn:schemas-microsoft-com:office:excel"
+          xmlns="http://www.w3.org/TR/REC-html40">
+      <head>
+        <meta charset="utf-8">
+        <!--[if gte mso 9]><xml><x:ExcelWorkbook><x:ExcelWorksheets><x:ExcelWorksheet><x:Name>装箱单</x:Name><x:WorksheetOptions><x:DisplayGridlines/></x:WorksheetOptions></x:ExcelWorksheet></x:ExcelWorksheets></x:ExcelWorkbook></xml><![endif]-->
+      </head>
+      <body>${sheets}</body>
+    </html>
+  `;
+}
+
+function buildStyledRows(rows, options = {}) {
+  const output = [];
+  if (options.includeHeader) {
+    output.push(`<tr>${DECLARATION_FIELDS.map((field) => buildStyledCell(field.label, field, { header: true })).join("")}</tr>`);
+  }
+  rows.forEach((row, index) => {
+    const continuation = options.blankMergedContinuations
+      && config.mergeBoxCells
+      && !config.mergeMixedNames
+      && index > 0
+      && rows[index - 1].boxNo === row.boxNo;
+    const cells = DECLARATION_FIELDS.map((field) => {
+      let value = row[field.key];
+      if (continuation && (field.key === "boxNo" || field.key === "totalBoxes")) value = "";
+      return buildStyledCell(value, field, { header: false });
+    }).join("");
+    output.push(`<tr>${cells}</tr>`);
+  });
+  return output.join("");
+}
+
+function buildStyledCell(value, field, options = {}) {
+  const span = getDeclarationLayout()[field.key];
+  const colspan = span > 1 ? ` colspan="${span}"` : "";
+  return `<td${colspan} style="${getDeclarationCellStyle(options.header ? "header" : field.key)}">${escapeHtml(value ?? "")}</td>`;
 }
 
 function getDeclarationCellStyle(fieldKey) {
