@@ -579,7 +579,7 @@ function mergeMixedOutputRows(shipmentId, rows, rawItems = []) {
       .map((item) => archive.items[mskuKey(item.msku)]?.goodsName || item.productName || item.sku || item.msku)
       .filter(Boolean);
     const uniqueNames = [...new Set(rawNames)];
-    const shouldMerge = group.length > 1 || uniqueNames.length > 1;
+    const shouldMerge = rawGroup.length > 1 || group.length > 1 || uniqueNames.length > 1;
 
     if (!shouldMerge) {
       merged.push(group[0]);
@@ -789,6 +789,7 @@ function openEditDialog() {
 
 function applyEditDialog() {
   syncArchiveFromEditRows();
+  persistArchive();
   rebuildOutputs();
 }
 
