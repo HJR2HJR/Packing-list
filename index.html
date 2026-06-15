@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>装箱单自动化工具</title>
+  <link rel="stylesheet" href="./styles.css">
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+</head>
+<body>
+  <main class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">PL</div>
+        <div>
+          <h1>装箱单自动化工具</h1>
+          <p>FBA Packing List</p>
+        </div>
+      </div>
+
+      <section class="panel">
+        <h2>输入文件</h2>
+        <label class="dropzone" id="dropzone">
+          <input id="fileInput" type="file" accept=".xlsx,.xls" multiple>
+          <i data-lucide="upload-cloud"></i>
+          <span>选择或拖入 Excel</span>
+        </label>
+        <div id="fileList" class="file-list"></div>
+      </section>
+
+      <section class="panel">
+        <h2>净重规则</h2>
+        <div class="field">
+          <label for="netMode">扣减方式</label>
+          <select id="netMode">
+            <option value="fixed">每行毛重扣减固定值</option>
+            <option value="percent">每行毛重扣减百分比</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="netValue">扣减值</label>
+          <input id="netValue" type="number" min="0" step="0.01" value="1">
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>混装处理</h2>
+        <label class="check-field">
+          <input id="mergeBoxCells" type="checkbox">
+          <span>合并单元格处理</span>
+        </label>
+        <p class="muted small-note">同一箱号多行时，箱号和总箱数合并，商品名称仍分行。</p>
+        <label class="check-field">
+          <input id="mergeMixedNames" type="checkbox">
+          <span>合并名称处理</span>
+        </label>
+        <p class="muted small-note">同一箱号多商品合并成一行，可自定义合并后的名称。</p>
+        <button id="editMixedNamesBtn" class="tool-btn full-btn" disabled><i data-lucide="combine"></i><span>编辑合并名称</span></button>
+      </section>
+
+      <section class="panel">
+        <h2>报关版式</h2>
+        <div class="layout-grid">
+          <label><span>标记号码</span><input id="layoutBoxNo" type="number" min="1" max="12" step="1"></label>
+          <label><span>货物名称</span><input id="layoutGoodsName" type="number" min="1" max="12" step="1"></label>
+          <label><span>总箱数</span><input id="layoutTotalBoxes" type="number" min="1" max="12" step="1"></label>
+          <label><span>总数量</span><input id="layoutQuantity" type="number" min="1" max="12" step="1"></label>
+          <label><span>总毛重</span><input id="layoutGrossWeight" type="number" min="1" max="12" step="1"></label>
+          <label><span>净重</span><input id="layoutNetWeight" type="number" min="1" max="12" step="1"></label>
+        </div>
+        <p class="muted small-note no-indent">数字表示该字段横向占几列，修改后立即保存。</p>
+      </section>
+
+      <section class="panel">
+        <h2>合并报关</h2>
+        <button id="editCustomsGroupsBtn" class="tool-btn full-btn" disabled><i data-lucide="merge"></i><span>管理合并报关</span></button>
+        <div id="customsGroupList" class="group-list"></div>
+      </section>
+
+      <section class="panel">
+        <h2>档案</h2>
+        <div class="button-grid">
+          <button id="pickArchiveBtn" class="tool-btn" title="选择档案文件"><i data-lucide="folder-open"></i><span>选择</span></button>
+          <button id="saveArchiveBtn" class="tool-btn" title="保存档案"><i data-lucide="save"></i><span>保存</span></button>
+          <button id="importArchiveBtn" class="tool-btn" title="导入档案"><i data-lucide="file-up"></i><span>导入</span></button>
+          <button id="exportArchiveBtn" class="tool-btn" title="导出档案"><i data-lucide="file-down"></i><span>导出</span></button>
+        </div>
+        <input id="archiveImport" type="file" accept=".json" hidden>
+        <input id="archiveExcelImport" type="file" accept=".xlsx,.xls" hidden>
+        <p id="archiveStatus" class="muted"></p>
+      </section>
+    </aside>
+
+    <section class="workspace">
+      <header class="topbar">
+        <div>
+          <h2>输出装箱单</h2>
+          <p id="summaryText">等待上传文件</p>
+        </div>
+        <div class="actions">
+          <label class="toolbar-check">
+            <input id="hideVisuals" type="checkbox">
+            <span>隐藏示意图</span>
+          </label>
+          <button id="editNamesBtn" class="primary-btn" disabled><i data-lucide="pencil"></i><span>编辑名称/毛重</span></button>
+          <button id="downloadBtn" class="primary-btn" disabled><i data-lucide="download"></i><span>下载 Excel</span></button>
+        </div>
+      </header>
+
+      <div id="alerts" class="alerts"></div>
+      <div id="results" class="results empty-state">
+        <i data-lucide="boxes"></i>
+        <p>上传 FBA 装箱单后生成结果</p>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="editDialog" class="edit-dialog">
+    <form method="dialog">
+      <header class="dialog-head">
+        <div>
+          <h2>编辑档案</h2>
+          <p>同一 MSKU 下次会自动带出名称和毛重</p>
+        </div>
+        <button value="cancel" class="icon-btn" title="关闭"><i data-lucide="x"></i></button>
+      </header>
+      <div class="dialog-tools">
+        <button id="importArchiveExcelBtn" type="button" class="tool-btn"><i data-lucide="sheet"></i><span>导入 Excel</span></button>
+        <button id="exportArchiveExcelBtn" type="button" class="tool-btn"><i data-lucide="sheet"></i><span>导出 Excel</span></button>
+      </div>
+      <div id="editRows" class="edit-rows"></div>
+      <footer class="dialog-foot">
+        <button value="cancel" class="secondary-btn">取消</button>
+        <button id="applyEditBtn" value="default" class="primary-btn">应用</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog id="customsGroupDialog" class="edit-dialog narrow-dialog">
+    <form method="dialog">
+      <header class="dialog-head">
+        <div>
+          <h2>管理合并报关</h2>
+          <p>勾选两个或多个 FBA 货件后保存为一组</p>
+        </div>
+        <button value="cancel" class="icon-btn" title="关闭"><i data-lucide="x"></i></button>
+      </header>
+      <div class="customs-editor">
+        <div id="customsShipmentChoices" class="choice-list"></div>
+        <button id="addCustomsGroupBtn" type="button" class="tool-btn full-btn"><i data-lucide="plus"></i><span>添加合并组</span></button>
+        <div id="customsDialogGroups" class="group-list"></div>
+      </div>
+      <footer class="dialog-foot">
+        <button value="cancel" class="secondary-btn">关闭</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog id="mixedNameDialog" class="edit-dialog">
+    <form method="dialog">
+      <header class="dialog-head">
+        <div>
+          <h2>编辑合并名称</h2>
+          <p>只显示同一箱号下有多个商品名称的箱子</p>
+        </div>
+        <button value="cancel" class="icon-btn" title="关闭"><i data-lucide="x"></i></button>
+      </header>
+      <div id="mixedNameRows" class="edit-rows"></div>
+      <footer class="dialog-foot">
+        <button value="cancel" class="secondary-btn">取消</button>
+        <button id="applyMixedNamesBtn" value="default" class="primary-btn">应用</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <template id="shipmentTemplate">
+    <details class="shipment" open>
+      <summary>
+        <span class="shipment-title"></span>
+        <span class="shipment-meta"></span>
+        <button class="icon-btn copy-btn" title="复制表格"><i data-lucide="copy"></i></button>
+      </summary>
+      <div class="visual-wrap"></div>
+      <div class="table-wrap"></div>
+    </details>
+  </template>
+
+  <script src="./app.js"></script>
+</body>
+</html>
