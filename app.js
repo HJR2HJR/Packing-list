@@ -431,7 +431,7 @@ function renderResults() {
     const node = template.content.cloneNode(true);
     const details = node.querySelector(".shipment");
     node.querySelector(".shipment-title").textContent = shipment.displayName || shipment.shipmentId;
-    node.querySelector(".shipment-meta").textContent = `${shipment.mode || "未知装箱方式"} · ${shipment.outputRows.length} 行`;
+    node.querySelector(".shipment-meta").textContent = `${shipment.mode || "未知装箱方式"} · ${shipment.outputRows.length} 行 · ${getMixedModeText()}`;
     const copyButton = node.querySelector(".copy-btn");
     copyButton.addEventListener("click", (event) => {
       event.preventDefault();
@@ -448,6 +448,13 @@ function renderResults() {
     els.results.appendChild(node);
   }
   refreshIcons();
+}
+
+function getMixedModeText() {
+  const modes = [];
+  if (config.mergeBoxCells) modes.push("合并单元格");
+  if (config.mergeMixedNames) modes.push("合并名称");
+  return modes.length ? modes.join(" / ") : "未启用混装处理";
 }
 
 function buildTable(rows) {
@@ -1072,7 +1079,7 @@ function buildSpreadsheetCell(value, field, options = {}) {
 }
 
 function getVerticalMergeDown(rows, rowIndex, field) {
-  if (!config.mergeBoxCells || config.mergeMixedNames || field.span !== 1) return 0;
+  if (!config.mergeBoxCells || config.mergeMixedNames) return 0;
   if (field.key !== "boxNo" && field.key !== "totalBoxes") return 0;
   if (rowIndex > 0 && rows[rowIndex - 1].boxNo === rows[rowIndex].boxNo) return 0;
 
@@ -1082,7 +1089,7 @@ function getVerticalMergeDown(rows, rowIndex, field) {
 }
 
 function isVerticalMergeContinuation(rows, rowIndex, field) {
-  if (!config.mergeBoxCells || config.mergeMixedNames || field.span !== 1) return false;
+  if (!config.mergeBoxCells || config.mergeMixedNames) return false;
   if (field.key !== "boxNo" && field.key !== "totalBoxes") return false;
   return rowIndex > 0 && rows[rowIndex - 1].boxNo === rows[rowIndex].boxNo;
 }
