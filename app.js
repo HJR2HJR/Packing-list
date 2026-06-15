@@ -460,11 +460,13 @@ function buildTable(rows) {
   });
 
   const tbody = table.createTBody();
-  rows.forEach((row) => {
+  rows.forEach((row, rowIndex) => {
     const tr = tbody.insertRow();
     DECLARATION_FIELDS.forEach((field) => {
+      if (isVerticalMergeContinuation(rows, rowIndex, field)) return;
       appendCell(tr, row[field.key], field, {
         colSpan: layout[field.key],
+        rowSpan: getVerticalMergeDown(rows, rowIndex, field) + 1,
         warn: field.key === "grossWeight" && row.grossSource !== "input",
       });
     });
@@ -486,6 +488,7 @@ function appendCell(tr, value, field, options = {}) {
   td.textContent = value;
   if (field.numeric) td.className = "num";
   if (options.colSpan > 1) td.colSpan = options.colSpan;
+  if (options.rowSpan > 1) td.rowSpan = options.rowSpan;
   td.style.cssText = getDeclarationCellStyle(field.key);
   if (options.warn) {
     td.classList.add("warn");
@@ -1090,15 +1093,13 @@ function buildStyledRows(rows, options = {}) {
     output.push(`<tr>${DECLARATION_FIELDS.map((field) => buildStyledCell(field.label, field, { header: true })).join("")}</tr>`);
   }
   rows.forEach((row, index) => {
-    const continuation = options.blankMergedContinuations
-      && config.mergeBoxCells
-      && !config.mergeMixedNames
-      && index > 0
-      && rows[index - 1].boxNo === row.boxNo;
     const cells = DECLARATION_FIELDS.map((field) => {
+      if (isVerticalMergeContinuation(rows, index, field)) return "";
       let value = row[field.key];
-      if (continuation && (field.key === "boxNo" || field.key === "totalBoxes")) value = "";
-      return buildStyledCell(value, field, { header: false });
+      return buildStyledCell(value, field, {
+        header: false,
+        rowSpan: getVerticalMergeDown(rows, index, field) + 1,
+      });
     }).join("");
     output.push(`<tr>${cells}</tr>`);
   });
@@ -1108,7 +1109,8 @@ function buildStyledRows(rows, options = {}) {
 function buildStyledCell(value, field, options = {}) {
   const span = getDeclarationLayout()[field.key];
   const colspan = span > 1 ? ` colspan="${span}"` : "";
-  return `<td${colspan} style="${getDeclarationCellStyle(options.header ? "header" : field.key)}">${escapeHtml(value ?? "")}</td>`;
+  const rowspan = options.rowSpan > 1 ? ` rowspan="${options.rowSpan}"` : "";
+  return `<td${colspan}${rowspan} style="${getDeclarationCellStyle(options.header ? "header" : field.key)}">${escapeHtml(value ?? "")}</td>`;
 }
 
 function getDeclarationCellStyle(fieldKey) {
