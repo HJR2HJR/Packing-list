@@ -353,7 +353,7 @@ function finalizeShipment({ shipmentId, mode, fileName, rawItems }, mergeOutput 
       productNames: [...row.productNames],
     }));
 
-  const outputRows = mergeOutput && config.mergeMixedNames ? mergeMixedOutputRows(shipmentId, baseRows) : baseRows;
+  const outputRows = mergeOutput && config.mergeMixedNames ? mergeMixedOutputRows(shipmentId, baseRows, rawItems) : baseRows;
   return { shipmentId, mode, fileName, rawItems, outputRows };
 }
 
@@ -560,25 +560,37 @@ function buildVisual(shipment) {
   return wrap;
 }
 
-function mergeMixedOutputRows(shipmentId, rows) {
+function mergeMixedOutputRows(shipmentId, rows, rawItems = []) {
   const byBox = new Map();
   rows.forEach((row) => {
     if (!byBox.has(row.boxNo)) byBox.set(row.boxNo, []);
     byBox.get(row.boxNo).push(row);
   });
+  const rawByBox = new Map();
+  rawItems.forEach((item) => {
+    if (!rawByBox.has(item.boxNo)) rawByBox.set(item.boxNo, []);
+    rawByBox.get(item.boxNo).push(item);
+  });
 
   const merged = [];
-  for (const group of byBox.values()) {
-    if (group.length === 1) {
+  for (const [boxNo, group] of byBox.entries()) {
+    const rawGroup = rawByBox.get(boxNo) || [];
+    const rawNames = rawGroup
+      .map((item) => archive.items[mskuKey(item.msku)]?.goodsName || item.productName || item.sku || item.msku)
+      .filter(Boolean);
+    const uniqueNames = [...new Set(rawNames)];
+    const shouldMerge = group.length > 1 || uniqueNames.length > 1;
+
+    if (!shouldMerge) {
       merged.push(group[0]);
       continue;
     }
 
-    const names = [...new Set(group.map((row) => row.goodsName).filter(Boolean))];
-    const key = mixedNameKey(shipmentId, group[0].boxNo);
+    const names = uniqueNames.length ? uniqueNames : [...new Set(group.map((row) => row.goodsName).filter(Boolean))];
+    const key = mixedNameKey(shipmentId, boxNo);
     const defaultName = defaultMixedName(names);
     merged.push({
-      boxNo: group[0].boxNo,
+      boxNo,
       goodsName: config.mixedNames?.[key] || defaultName,
       totalBoxes: 1,
       quantity: round(group.reduce((sum, row) => sum + Number(row.quantity || 0), 0), 2),
@@ -595,19 +607,15 @@ function mergeMixedOutputRows(shipmentId, rows) {
 function getMixedNameGroups() {
   const groups = [];
   shipments.forEach((shipment) => {
-    const baseRows = finalizeShipment({
-      shipmentId: shipment.shipmentId,
-      mode: shipment.mode,
-      fileName: shipment.fileName,
-      rawItems: shipment.rawItems,
-    }, false).outputRows;
     const byBox = new Map();
-    baseRows.forEach((row) => {
-      if (!byBox.has(row.boxNo)) byBox.set(row.boxNo, []);
-      byBox.get(row.boxNo).push(row);
+    shipment.rawItems.forEach((item) => {
+      if (!byBox.has(item.boxNo)) byBox.set(item.boxNo, []);
+      byBox.get(item.boxNo).push(item);
     });
-    byBox.forEach((rows, boxNo) => {
-      const names = [...new Set(rows.map((row) => row.goodsName).filter(Boolean))];
+    byBox.forEach((items, boxNo) => {
+      const names = [...new Set(items
+        .map((item) => archive.items[mskuKey(item.msku)]?.goodsName || item.productName || item.sku || item.msku)
+        .filter(Boolean))];
       if (names.length < 2) return;
       const key = mixedNameKey(shipment.shipmentId, boxNo);
       groups.push({
