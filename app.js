@@ -411,6 +411,12 @@ function rebuildOutputs() {
   updateControls();
 }
 
+function getShipmentOutputRows(shipment) {
+  if (!shipment) return [];
+  if (!config.mergeMixedNames) return shipment.outputRows || [];
+  return mergeMixedOutputRows(shipment.shipmentId, shipment.outputRows || [], shipment.rawItems || []);
+}
+
 function renderResults() {
   els.results.innerHTML = "";
   els.results.classList.toggle("empty-state", shipments.length === 0);
@@ -423,15 +429,16 @@ function renderResults() {
   }
 
   const displayShipments = getDisplayShipments();
-  const totalRows = displayShipments.reduce((sum, item) => sum + item.outputRows.length, 0);
+  const totalRows = displayShipments.reduce((sum, item) => sum + getShipmentOutputRows(item).length, 0);
   els.summaryText.textContent = `已解析 ${shipments.length} 个货件，${displayShipments.length} 组输出，${totalRows} 行`;
 
   const template = document.querySelector("#shipmentTemplate");
   for (const shipment of displayShipments) {
+    const outputRows = getShipmentOutputRows(shipment);
     const node = template.content.cloneNode(true);
     const details = node.querySelector(".shipment");
     node.querySelector(".shipment-title").textContent = shipment.displayName || shipment.shipmentId;
-    node.querySelector(".shipment-meta").textContent = `${shipment.mode || "未知装箱方式"} · ${shipment.outputRows.length} 行 · ${getMixedModeText()}`;
+    node.querySelector(".shipment-meta").textContent = `${shipment.mode || "未知装箱方式"} · ${outputRows.length} 行 · ${getMixedModeText()}`;
     const copyButton = node.querySelector(".copy-btn");
     copyButton.addEventListener("click", (event) => {
       event.preventDefault();
@@ -443,7 +450,7 @@ function renderResults() {
     } else {
       visualWrap.appendChild(buildVisual(shipment));
     }
-    node.querySelector(".table-wrap").appendChild(buildTable(shipment.outputRows));
+    node.querySelector(".table-wrap").appendChild(buildTable(outputRows));
     details.dataset.shipmentId = shipment.shipmentId;
     els.results.appendChild(node);
   }
@@ -561,47 +568,43 @@ function buildVisual(shipment) {
 }
 
 function mergeMixedOutputRows(shipmentId, rows, rawItems = []) {
-  const byBox = new Map();
-  rows.forEach((row) => {
-    if (!byBox.has(row.boxNo)) byBox.set(row.boxNo, []);
-    byBox.get(row.boxNo).push(row);
-  });
   const rawByBox = new Map();
   rawItems.forEach((item) => {
     if (!rawByBox.has(item.boxNo)) rawByBox.set(item.boxNo, []);
     rawByBox.get(item.boxNo).push(item);
   });
 
-  const merged = [];
-  for (const [boxNo, group] of byBox.entries()) {
-    const rawGroup = rawByBox.get(boxNo) || [];
-    const rawNames = rawGroup
-      .map((item) => archive.items[mskuKey(item.msku)]?.goodsName || item.productName || item.sku || item.msku)
-      .filter(Boolean);
-    const uniqueNames = [...new Set(rawNames)];
-    const shouldMerge = rawGroup.length > 1 || group.length > 1 || uniqueNames.length > 1;
+  if (!rawByBox.size) return rows;
 
-    if (!shouldMerge) {
-      merged.push(group[0]);
-      continue;
+  const merged = [...rawByBox.entries()].map(([boxNo, rawGroup]) => {
+    const cargoGroups = getMixedCargoGroups(rawGroup);
+
+    if (cargoGroups.length <= 1) {
+      const goodsName = getSingleCargoDisplayName(rawGroup, cargoGroups[0]);
+      return aggregateRawBoxItems(boxNo, rawGroup, goodsName);
     }
 
-    const names = uniqueNames.length ? uniqueNames : [...new Set(group.map((row) => row.goodsName).filter(Boolean))];
+    const names = [...new Set(cargoGroups.map((item) => item.name).filter(Boolean))];
     const key = mixedNameKey(shipmentId, boxNo);
     const defaultName = defaultMixedName(names);
-    merged.push({
-      boxNo,
-      goodsName: config.mixedNames?.[key] || defaultName,
-      totalBoxes: 1,
-      quantity: round(group.reduce((sum, row) => sum + Number(row.quantity || 0), 0), 2),
-      grossWeight: round(group.reduce((sum, row) => sum + Number(row.grossWeight || 0), 0), 2),
-      netWeight: round(group.reduce((sum, row) => sum + Number(row.netWeight || 0), 0), 2),
-      grossSource: group.some((row) => row.grossSource !== "input") ? "calculated" : "input",
-      mskus: [...new Set(group.flatMap((row) => row.mskus || []))],
-      productNames: [...new Set(group.flatMap((row) => row.productNames || []))],
-    });
-  }
+    return aggregateRawBoxItems(boxNo, rawGroup, config.mixedNames?.[key] || defaultName);
+  });
+
   return merged.sort((a, b) => compareBoxNo(a.boxNo, b.boxNo) || a.goodsName.localeCompare(b.goodsName, "zh-CN"));
+}
+
+function aggregateRawBoxItems(boxNo, items, goodsName) {
+  return {
+    boxNo,
+    goodsName,
+    totalBoxes: 1,
+    quantity: round(items.reduce((sum, item) => sum + Number(item.quantity || 0), 0), 2),
+    grossWeight: round(items.reduce((sum, item) => sum + Number(item.grossWeight || 0), 0), 2),
+    netWeight: round(calcNetWeight(items.reduce((sum, item) => sum + Number(item.grossWeight || 0), 0)), 2),
+    grossSource: items.some((item) => item.grossSource !== "input") ? "calculated" : "input",
+    mskus: [...new Set(items.map((item) => item.msku).filter(Boolean))],
+    productNames: [...new Set(items.map((item) => item.productName).filter(Boolean))],
+  };
 }
 
 function getMixedNameGroups() {
@@ -613,10 +616,9 @@ function getMixedNameGroups() {
       byBox.get(item.boxNo).push(item);
     });
     byBox.forEach((items, boxNo) => {
-      const names = [...new Set(items
-        .map((item) => archive.items[mskuKey(item.msku)]?.goodsName || item.productName || item.sku || item.msku)
-        .filter(Boolean))];
-      if (names.length < 2) return;
+      const cargoGroups = getMixedCargoGroups(items);
+      if (cargoGroups.length < 2) return;
+      const names = [...new Set(cargoGroups.map((item) => item.name).filter(Boolean))];
       const key = mixedNameKey(shipment.shipmentId, boxNo);
       groups.push({
         key,
@@ -631,11 +633,34 @@ function getMixedNameGroups() {
   return groups.sort((a, b) => a.shipmentId.localeCompare(b.shipmentId) || compareBoxNo(a.boxNo, b.boxNo));
 }
 
+function getMixedCargoGroups(items) {
+  const groups = new Map();
+  items.forEach((item) => {
+    const name = item.productName || item.sku || item.msku;
+    const sku = normalize(item.sku);
+    const key = `${normalize(name)}\u0000${sku || normalize(name) || normalize(item.msku)}`;
+    if (!groups.has(key)) groups.set(key, { name, sku });
+  });
+  return [...groups.values()];
+}
+
+function getSingleCargoDisplayName(items, cargoGroup) {
+  const archivedNames = [...new Set(items
+    .map((item) => archive.items[mskuKey(item.msku)]?.goodsName)
+    .filter(Boolean))];
+  if (archivedNames.length === 1) return archivedNames[0];
+  return cargoGroup?.name || getRawItemGoodsName(items[0]) || "";
+}
+
+function getRawItemGoodsName(item) {
+  return archive.items[mskuKey(item.msku)]?.goodsName || item.productName || item.sku || item.msku;
+}
+
 function groupRawItemsByBox(rawItems) {
   const byBox = new Map();
   rawItems.forEach((item) => {
     if (!byBox.has(item.boxNo)) byBox.set(item.boxNo, new Map());
-    const goodsName = archive.items[mskuKey(item.msku)]?.goodsName || item.productName || item.sku || item.msku;
+    const goodsName = getRawItemGoodsName(item);
     const productMap = byBox.get(item.boxNo);
     const current = productMap.get(goodsName) || { name: goodsName, quantity: 0 };
     current.quantity += Number(item.quantity || 0);
@@ -711,7 +736,7 @@ function buildCustomsShipment(members) {
     mode: "合并报关",
     fileName: ids.join("&"),
     rawItems: members.flatMap((shipment) => shipment.rawItems),
-    outputRows: members.flatMap((shipment) => shipment.outputRows),
+    outputRows: members.flatMap((shipment) => getShipmentOutputRows(shipment)),
     customsMembers: members,
   };
 }
@@ -945,8 +970,9 @@ function renderCustomsGroupsInto(container, removable) {
 }
 
 async function copyShipment(shipment) {
-  const text = toDeclarationAoa(shipment.outputRows, { includeHeader: false, blankMergedContinuations: false }).map((row) => row.join("\t")).join("\n");
-  const html = buildClipboardHtml(shipment.outputRows);
+  const outputRows = getShipmentOutputRows(shipment);
+  const text = toDeclarationAoa(outputRows, { includeHeader: false, blankMergedContinuations: false }).map((row) => row.join("\t")).join("\n");
+  const html = buildClipboardHtml(outputRows);
   if (window.ClipboardItem) {
     await navigator.clipboard.write([
       new ClipboardItem({
@@ -995,12 +1021,13 @@ function buildClipboardHtml(rows) {
 function buildSpreadsheetXml(displayShipments) {
   const worksheets = displayShipments.map((shipment) => {
     const sheetName = xmlEscape(safeSheetName(shipment.displayName || shipment.shipmentId));
+    const outputRows = getShipmentOutputRows(shipment);
     return `
       <Worksheet ss:Name="${sheetName}">
         <Table>
           ${buildSpreadsheetColumns()}
           ${buildSpreadsheetHeaderRow()}
-          ${buildSpreadsheetDataRows(shipment.outputRows)}
+          ${buildSpreadsheetDataRows(outputRows)}
         </Table>
         <WorksheetOptions xmlns="urn:schemas-microsoft-com:office:excel">
           <DisplayGridlines/>
