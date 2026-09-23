@@ -147,20 +147,17 @@ async function handleFiles(files) {
     return;
   }
 
-  const xlsxFiles = files.filter((file) => /\.(xlsx|xls)$/i.test(file.name));
-  if (!xlsxFiles.length) return;
+  const inputFiles = files.filter((file) => /\.(xlsx|xls|csv)$/i.test(file.name));
+  if (!inputFiles.length) return;
 
-  renderFileList(xlsxFiles);
+  renderFileList(inputFiles);
   setAlerts([]);
   shipments = [];
   const alerts = [];
 
-  for (const file of xlsxFiles) {
+  for (const file of inputFiles) {
     try {
-      const buffer = await file.arrayBuffer();
-      const workbook = XLSX.read(buffer, { type: "array" });
-      const sheetName = workbook.SheetNames[0];
-      const rows = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], { header: 1, defval: "", raw: false });
+      const rows = await readRowsFromFile(file);
       const parsed = parseShipment(rows, file.name);
       shipments.push(parsed);
     } catch (error) {
@@ -170,14 +167,26 @@ async function handleFiles(files) {
 
   rebuildOutputs();
   if (!shipments.length && !alerts.length) {
-    alerts.push("没有解析到可用的 FBA 货件，请确认上传的是 FBA 装箱单 Excel。");
+    alerts.push("没有解析到可用的 FBA 货件，请确认上传的是 FBA 装箱单 Excel 或 CSV。");
   }
   setAlerts(alerts);
+}
+
+async function readRowsFromFile(file) {
+  const isCsv = /\.csv$/i.test(file.name);
+  const workbook = isCsv
+    ? XLSX.read(await file.text(), { type: "string", raw: false })
+    : XLSX.read(await file.arrayBuffer(), { type: "array" });
+  const sheetName = workbook.SheetNames[0];
+  return XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], { header: 1, defval: "", raw: false });
 }
 
 function parseShipment(rows, fileName) {
   const shipmentId = findValueAfter(rows, "货件单号") || fileName.replace(/\.[^.]+$/, "");
   const mode = findValueAfter(rows, "装箱方式");
+  const amazonCsvMode = getAmazonCsvMode(rows);
+  if (amazonCsvMode) return parseAmazonCsvShipment(rows, fileName, amazonCsvMode);
+
   const headerRowIndex = rows.findIndex((row) => row.some((cell) => normalize(cell) === "MSKU"));
   if (headerRowIndex < 0) throw new Error("未找到 MSKU 表头");
 
@@ -189,6 +198,143 @@ function parseShipment(rows, fileName) {
   return isMixed
     ? parseMixedShipment(rows, headerRowIndex, idx, shipmentId, mode, fileName)
     : parseSingleSkuShipment(rows, headerRowIndex, idx, shipmentId, mode, fileName);
+}
+
+function getAmazonCsvMode(rows) {
+  const section = findAmazonCsvSection(rows);
+  return section?.title || "";
+}
+
+function parseAmazonCsvShipment(rows, fileName, sectionTitle) {
+  const shipmentId = findValueAfter(rows, "货件编号") || fileName.replace(/\.[^.]+$/, "");
+  const mode = `紫鸟CSV · ${sectionTitle}`;
+  const section = findAmazonCsvSection(rows);
+  if (!section) throw new Error("未找到紫鸟 CSV 装箱段落");
+
+  if (sectionTitle.includes("原厂包装")) {
+    return parseAmazonCasePackedCsv(rows, shipmentId, mode, fileName, section.index);
+  }
+  return parseAmazonIndividualCsv(rows, shipmentId, mode, fileName, section.index);
+}
+
+function findAmazonCsvSection(rows) {
+  for (let index = 0; index < rows.length; index += 1) {
+    const title = rows[index].map(normalize).find((text) => text.includes("原厂包装发货") || text.includes("单件商品"));
+    if (title) return { index, title };
+  }
+  return null;
+}
+
+function parseAmazonCasePackedCsv(rows, shipmentId, mode, fileName, sectionIndex) {
+  const headerRowIndex = findNextHeaderRow(rows, sectionIndex, "SKU");
+  const headers = rows[headerRowIndex].map(normalize);
+  const idx = mapAmazonCaseHeaders(headers);
+  requireHeaderIndexes(idx, ["msku", "productName", "boxWeight", "perBoxQty", "boxCount", "boxNo"]);
+
+  const rawItems = [];
+  for (let r = headerRowIndex + 1; r < rows.length; r += 1) {
+    const row = rows[r];
+    const msku = cell(row, idx.msku);
+    if (!msku) continue;
+
+    const boxNos = splitBoxNos(cell(row, idx.boxNo));
+    const perBoxQty = toNumber(cell(row, idx.perBoxQty)) || 1;
+    const boxWeight = toNumber(cell(row, idx.boxWeight));
+    const boxCount = toNumber(cell(row, idx.boxCount)) || boxNos.length;
+    const selectedBoxNos = boxNos.length ? boxNos : buildFallbackBoxNos(shipmentId, boxCount);
+
+    if (boxWeight && perBoxQty) {
+      upsertArchive(mskuKey(msku), { unitGross: round(boxWeight / perBoxQty, 4) }, false);
+    }
+
+    selectedBoxNos.forEach((boxNo) => {
+      rawItems.push({
+        boxNo,
+        msku,
+        productName: cell(row, idx.productName),
+        sku: cell(row, idx.sku),
+        quantity: perBoxQty,
+        grossWeight: boxWeight,
+        grossSource: boxWeight ? "input" : "calculated",
+      });
+    });
+  }
+
+  if (!rawItems.length) throw new Error("紫鸟 CSV 原厂包装段落没有可用明细");
+  return finalizeShipment({ shipmentId, mode, fileName, rawItems });
+}
+
+function parseAmazonIndividualCsv(rows, shipmentId, mode, fileName, sectionIndex) {
+  const headerRowIndex = findNextHeaderRow(rows, sectionIndex, "SKU");
+  const headers = rows[headerRowIndex].map(normalize);
+  const idx = mapAmazonIndividualHeaders(headers);
+  requireHeaderIndexes(idx, ["msku", "productName", "totalQty"]);
+
+  const boxColumns = headers
+    .map((header, index) => ({ header, index }))
+    .filter((item) => /^箱子\s*\d+\s*的商品数量$/.test(item.header));
+  if (!boxColumns.length) throw new Error("紫鸟 CSV 未找到箱子 N 的商品数量列");
+
+  const metaRows = findAmazonIndividualMetaRows(rows, headerRowIndex);
+  const sourceRows = [];
+  for (let r = headerRowIndex + 1; r < rows.length; r += 1) {
+    const row = rows[r];
+    if (r === metaRows.boxNo) break;
+    const msku = cell(row, idx.msku);
+    if (!msku) continue;
+    sourceRows.push({
+      row,
+      msku,
+      productName: cell(row, idx.productName),
+      sku: cell(row, idx.sku),
+    });
+  }
+
+  const unitWeights = inferAmazonIndividualUnitWeights(sourceRows, boxColumns, metaRows);
+  const rawItems = [];
+
+  for (const box of boxColumns) {
+    const boxNo = cell(rows[metaRows.boxNo], box.index) || box.header;
+    const boxWeight = toNumber(cell(rows[metaRows.weight], box.index));
+    const entries = sourceRows
+      .map((item) => ({ ...item, quantity: toNumber(cell(item.row, box.index)) }))
+      .filter((item) => item.quantity > 0);
+    const totalQty = entries.reduce((sum, item) => sum + item.quantity, 0);
+
+    for (const item of entries) {
+      const key = mskuKey(item.msku);
+      const archivedWeight = Number(archive.items[key]?.unitGross || 0);
+      const inferredWeight = unitWeights.get(key) || 0;
+      let grossWeight = 0;
+      let grossSource = "calculated";
+
+      if (entries.length === 1) {
+        grossWeight = boxWeight;
+        grossSource = boxWeight ? "input" : "calculated";
+      } else if (archivedWeight) {
+        grossWeight = archivedWeight * item.quantity;
+        grossSource = "archive";
+      } else if (inferredWeight) {
+        grossWeight = inferredWeight * item.quantity;
+        grossSource = "inferred";
+      } else if (boxWeight && totalQty) {
+        grossWeight = boxWeight * item.quantity / totalQty;
+      }
+
+      rawItems.push({
+        boxNo,
+        msku: item.msku,
+        productName: item.productName,
+        sku: item.sku,
+        quantity: item.quantity,
+        grossWeight,
+        grossSource,
+      });
+    }
+  }
+
+  if (!rawItems.length) throw new Error("紫鸟 CSV 单件商品段落没有可用明细");
+  return finalizeShipment({ shipmentId, mode, fileName, rawItems });
 }
 
 function parseSingleSkuShipment(rows, headerRowIndex, idx, shipmentId, mode, fileName) {
@@ -377,6 +523,80 @@ function mapHeaders(headers) {
     boxWeight: headers.findIndex((h) => h.includes("箱子毛重")),
     boxNo: headers.indexOf("箱号"),
   };
+}
+
+function mapAmazonCaseHeaders(headers) {
+  return {
+    msku: headers.indexOf("SKU"),
+    productName: headers.indexOf("商品名称"),
+    sku: headers.indexOf("FNSKU"),
+    boxWeight: headers.indexOf("包装箱重量（千克）"),
+    perBoxQty: headers.indexOf("每箱件数"),
+    boxCount: headers.indexOf("箱子总数"),
+    totalQty: headers.indexOf("商品总数"),
+    boxNo: headers.indexOf("箱号"),
+  };
+}
+
+function mapAmazonIndividualHeaders(headers) {
+  return {
+    msku: headers.indexOf("SKU"),
+    productName: headers.indexOf("商品名称"),
+    sku: headers.indexOf("FNSKU"),
+    totalQty: headers.indexOf("商品总数"),
+  };
+}
+
+function requireHeaderIndexes(indexes, keys) {
+  const missing = keys.filter((key) => indexes[key] == null || indexes[key] < 0);
+  if (missing.length) throw new Error(`缺少必要列: ${missing.join(", ")}`);
+}
+
+function findNextHeaderRow(rows, startIndex, firstHeader) {
+  for (let index = startIndex + 1; index < rows.length; index += 1) {
+    if (rows[index].some((value) => normalize(value) === firstHeader)) return index;
+  }
+  throw new Error(`未找到 ${firstHeader} 表头`);
+}
+
+function findAmazonIndividualMetaRows(rows, headerRowIndex) {
+  const meta = { rows };
+  for (let index = headerRowIndex + 1; index < rows.length; index += 1) {
+    const labelIndex = rows[index].findIndex((value) => normalize(value) === "箱号");
+    if (labelIndex >= 0) meta.boxNo = index;
+    const weightIndex = rows[index].findIndex((value) => normalize(value).includes("包装箱重量"));
+    if (weightIndex >= 0) meta.weight = index;
+  }
+  if (meta.boxNo == null || meta.weight == null) throw new Error("紫鸟 CSV 未找到箱号或包装箱重量行");
+  return meta;
+}
+
+function inferAmazonIndividualUnitWeights(sourceRows, boxColumns, metaRows) {
+  const inferred = new Map();
+  for (const box of boxColumns) {
+    const boxWeight = toNumber(cell(metaRows.rows[metaRows.weight], box.index));
+    if (!boxWeight) continue;
+    const entries = sourceRows
+      .map((item) => ({ key: mskuKey(item.msku), qty: toNumber(cell(item.row, box.index)) }))
+      .filter((item) => item.qty > 0);
+    if (entries.length === 1 && entries[0].qty) {
+      const unitGross = round(boxWeight / entries[0].qty, 4);
+      inferred.set(entries[0].key, unitGross);
+      upsertArchive(entries[0].key, { unitGross }, false);
+    }
+  }
+  return inferred;
+}
+
+function splitBoxNos(value) {
+  return normalize(value)
+    .split(/[,\n，、;；]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function buildFallbackBoxNos(shipmentId, count) {
+  return Array.from({ length: count }, (_, index) => `${shipmentId}U${String(index + 1).padStart(6, "0")}`);
 }
 
 function expandBoxRange(value) {
